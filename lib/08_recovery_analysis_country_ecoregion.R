@@ -70,9 +70,9 @@ for (i in sort(cntrs)) {
   
   d <- recovery_trajectories_summary_country %>% filter(country == i)
   
-  fit <- tryCatch(nlsLM(treecover_rel_mean ~ M + (1 - M) / (1 + exp( -k * (since_disturbance - x0))),
+  fit <- tryCatch(nlsLM(treecover_rel_mean ~ N + M / (1 + exp( -k * (since_disturbance - x0))),
                         data = d,
-                        start = list(M = 0, k = 0.5, x0 = 15),
+                        start = list(M = 1, k = 0.5, x0 = 15),
                         control = list(maxiter = 150)),
                   error = function(err) return(NA))
   
@@ -81,11 +81,14 @@ for (i in sort(cntrs)) {
     recovery_rate_collector <- c(recovery_rate_collector, NA)
   } else {
     p <- predict(fit, newdata = data.frame(since_disturbance = 1:1000))
-    p <- which(p >= 0.99)[1]
+    p <- which(p > 0.99)[1]
     recovery_interval_collector <- c(recovery_interval_collector,
                                      ifelse(is.na(p), 1001, p))
     recovery_rate_collector <- c(recovery_rate_collector, predict(fit, newdata = data.frame(since_disturbance = 30)))
   }
+  
+  
+  
   
 }
 
@@ -99,7 +102,7 @@ recovery_rates <- data.frame(country = cntrs,
 
 disturbance_regime_indicators <- read_csv("data/disturbance_regime_senf_and_seidl_2021_nature_sustainability.csv")
 
-grid <- read_sf("../mapping/data/gis/referencegrid/hexagon_50km.shp")
+grid <- read_sf("/data/Public/Projects/DisturbanceMappingEurope/mapping/data/gis/referencegrid/hexagon_50km.shp")
 grid <- grid %>% dplyr::rename(gridid = id)
 
 countries_sf <- read_sf("data/admin/countries_europe_simplyfied.shp")
@@ -131,7 +134,7 @@ recovery_rates %>%
   mutate(resilience = disturbance_interval / recovery_interval) %>%
   dplyr::select(country, recovery_interval, disturbance_interval, resilience) %>%
   gather(key = interval, value = value, -country) %>%
-  filter(interval == "resilience") %>% View()
+  filter(interval == "resilience") %>%
   ggplot(., aes(x = reorder(country, value, max), y = value)) +
   geom_bar(stat = "identity", position = "dodge") +
   coord_flip() +
@@ -140,5 +143,5 @@ recovery_rates %>%
 recovery_rates %>%
   left_join(disturbance_intervals_country) %>%
   mutate(resilience = disturbance_interval / recovery_interval) %>%
-  dplyr::select(country, recovery_interval, disturbance_interval, resilience) %>%
+  dplyr::select(country, recovery_interval, disturbance_interval, resilience) %>% View(.)
   write.csv(., "results/table01.csv")
