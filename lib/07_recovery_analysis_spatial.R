@@ -8,9 +8,12 @@ library(sf)
 library(raster)
 library(minpack.lm)
 
+# Create temp folder
+dir.create("temp")
+
 # Load grid and countries -------------------------------------------------
 
-grid <- read_sf("../mapping/data/gis/referencegrid/hexagon_50km.shp")
+grid <- read_sf("/data/Public/Projects/DisturbanceMappingEurope/mapping/data/gis/referencegrid/hexagon_50km.shp")
 
 grid <- grid %>%
   dplyr::rename(gridid = id)
@@ -190,7 +193,7 @@ for (cntr in cntrs) {
                             labels = c("<50", "50-90", ">90"),
                             include.lowest = TRUE)) %>%
     left_join(st_drop_geometry(grid_at_patches) %>%
-                dplyr::select(gridid, disturbance_patch, disturbance_year, tile)) %>%
+                dplyr::select(gridid, disturbance_patch, disturbance_year, tile)) %>% 
     group_by(since_disturbance, gridid, severity) %>%
     summarize(treecover_rel_mean = mean(treecover_rel, na.rm = TRUE),
               treecover_mean = mean(treecover, na.rm = TRUE),
@@ -229,8 +232,6 @@ gridids <- unique(recovery_rates_raw$gridid) %>% na.omit()
 
 for (i in sort(gridids)) {
   
-  #i <- sample(sort(gridids), 1)
-  
   print(paste0("Finished ", round(mean(i > sort(gridids)) * 100, 2), " %"))
   
   d <- recovery_rates_raw %>% filter(gridid == i)
@@ -246,9 +247,8 @@ for (i in sort(gridids)) {
     recovery_rate_collector <- c(recovery_rate_collector, NA)
   } else {
     p <- predict(fit, newdata = data.frame(since_disturbance = 1:1000))
-    p <- which(p >= 0.99)[1]
-    recovery_interval_collector <- c(recovery_interval_collector,
-                                     ifelse(is.na(p), 1001, p))
+    p <- which(p > 0.99)[1]
+    recovery_interval_collector <- c(recovery_interval_collector, ifelse(is.na(p), 1001, p))
     recovery_rate_collector <- c(recovery_rate_collector, predict(fit, newdata = data.frame(since_disturbance = 30)))
   }
   
@@ -257,12 +257,21 @@ for (i in sort(gridids)) {
 recovery_rates <- data.frame(gridid = gridids,
                              recovery_interval = recovery_interval_collector,
                              recovery_rate = recovery_rate_collector) %>%
-  as_tibble() %>%
-  mutate(recovery_interval = ifelse(recovery_interval < 10, 10, recovery_interval))
+  as_tibble()
+
+recovery_rates %>%
+  left_join(disturbance_regime_indicators, by = "gridid") %>%
+  group_by(recovery_interval) %>%
+  summarize(forest_ha = sum(forest_ha, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(forest_p = forest_ha / sum(forest_ha)) %>%
+  ggplot(., aes(x = recovery_interval, y = cumsum(forest_p))) +
+  geom_line() +
+  scale_x_log10()
 
 ### By patch-size
 
-load(file = "temp/recovery_trajectories_summary_grid_patch_size.RData")
+load(file = "temp/recovery_trajectories_summary_grid_patch_sisze.RData")
 
 recovery_rates_raw_patch_size <- recovery_trajectories_summary_grid_patch_size %>%
   group_by(since_disturbance, gridid, patch_size) %>%
@@ -277,11 +286,11 @@ patch_sizes <- unique(recovery_rates_raw_patch_size$patch_size) %>% na.omit()
 
 for (i in sort(gridids)) {
   
-  for (p in patch_sizes) {
+  for (s in patch_sizes) {
     
     print(paste0("Finished ", round(mean(i > sort(gridids)) * 100, 2), " %"))
     
-    d <- recovery_rates_raw_patch_size %>% filter(gridid == i & patch_size == p)
+    d <- recovery_rates_raw_patch_size %>% filter(gridid == i & patch_size == s)
     
     fit <- tryCatch(nlsLM(treecover_rel_mean ~ N + M / (1 + exp( -k * (since_disturbance - x0))),
                           data = d, 
@@ -390,7 +399,7 @@ example_data_interval <- example_models %>%
                    treecover_rel_mean = predict(., newdata = data.frame(since_disturbance = seq(1, 29, length.out = 1000))))) %>%
   bind_rows(.id = "gridid") %>%
   mutate(gridid = as.integer(gridid)) %>%
-  filter(treecover_rel_mean >= 0.99) %>%
+  filter(treecover_rel_mean > 0.99) %>%
   group_by(gridid) %>%
   summarize(interval = since_disturbance[1])
 
@@ -442,7 +451,7 @@ ggsave("figures/Figure02.pdf", p, width = 3.5, height = 3.5)
 
 recovery_rates %>%
   left_join(disturbance_regime_indicators) %>%
-  group_by(recovery_interval = cut(recovery_interval, c(0, 30, 100, 500, 1000, 1001))) %>%
+  group_by(recovery_interval = cut(recovery_interval, c(0, 30, 100, 1000, 1001))) %>%
   summarize(forest = sum(forest_ha, na.rm = TRUE)) %>%
   ungroup() %>%
   mutate(forest_p = forest / sum(forest) * 100)
@@ -459,6 +468,8 @@ density <- density(x = log10(recovery_rates_tmp$recovery_interval),
 
 recovery_interval_density <- data.frame(recovery_interval = density$x,
                                         density = density$y)
+
+library(spatstat)
 
 ri_mean <- sum(recovery_rates_tmp$recovery_interval * recovery_rates_tmp$w)
 ri_median <- weighted.median(recovery_rates_tmp$recovery_interval, recovery_rates_tmp$w)
@@ -587,28 +598,32 @@ p2 <- ggplot() +
 
 p <- p2 + p1
 
-ggsave("figures/figure03_corrected.pdf", p, width = 7.5, height = 3.5)
-
+ggsave("figures/figure03_correction.pdf", p, width = 7.5, height = 3.5)
 
 ### Recovery interval by patch-size
 
+n_patches_patchsizes <- recovery_trajectories_summary_grid_patch_size %>%
+  group_by(gridid, patch_size) %>%
+  summarise(patches_total = sum(patches_total)) %>%
+  ungroup()
+
 p1 <- recovery_rates_patch_size %>%
-  left_join(disturbance_regime) %>%
+  left_join(n_patches_patchsizes) %>%
   filter(!is.na(recovery_interval)) %>%
   group_by(patch_size, recovery_interval = cut(recovery_interval, 
-                                               c(0, 30, 100, 1000, 1001),
-                                               labels = c("0-30", "30-100", "100-1000", ">1000"))) %>%
-  summarize(forest = sum(forest_ha, na.rm = TRUE)) %>%
+                                               c(0, 30, 100, 1001),
+                                               labels = c("0-30", "30-100", ">100"))) %>%
+  summarize(patches_total = sum(patches_total)) %>%
   group_by(patch_size) %>%
-  mutate(forest_p = forest / sum(forest)) %>%
+  mutate(patches_p = patches_total / sum(patches_total)) %>%
   ungroup() %>%
-  ggplot(., aes(x = patch_size, y = forest_p, fill = recovery_interval)) +
+  ggplot(., aes(x = patch_size, y = patches_p, fill = recovery_interval)) +
   geom_bar(stat = "identity") +
-  scale_fill_manual(values = c("#1B7837", "#5AAE61", "#ACD39E", "#D9F0D3")) +
+  scale_fill_manual(values = c("#1B7837", "#5AAE61", "#ACD39E")) +
   scale_x_discrete(expand = c(0, 0)) +
   scale_y_continuous(expand = c(0, 0)) +
   labs(x = "Patch-size (ha)",
-       y = "Prop. forest area",
+       y = "Prop. of patches",
        fill = "Recovery\ninterval") +
   theme_linedraw() +
   theme(panel.border = element_rect(colour = "black", fill = NA, size = 1),
@@ -627,23 +642,28 @@ ggsave("figures/figure04a.pdf", p1, width = 3.5, height = 3.5)
 
 ### Recovery interval by severity
 
+n_patches_severities <- recovery_trajectories_summary_grid_severity %>%
+  group_by(gridid, severity) %>%
+  summarise(patches_total = sum(patches_total)) %>%
+  ungroup()
+
 p2 <- recovery_rates_severity %>%
-  left_join(disturbance_regime) %>%
+  left_join(n_patches_severities) %>%
   filter(!is.na(recovery_interval)) %>%
   group_by(severity, recovery_interval = cut(recovery_interval, 
-                                             c(0, 30, 100, 1000, 1001),
-                                             labels = c("0-30", "30-100", "100-1000", ">1000"))) %>%
-  summarize(forest = sum(forest_ha, na.rm = TRUE)) %>%
+                                               c(0, 30, 100, 1001),
+                                               labels = c("0-30", "30-100", ">100"))) %>%
+  summarize(patches_total = sum(patches_total)) %>%
   group_by(severity) %>%
-  mutate(forest_p = forest / sum(forest)) %>%
+  mutate(patches_p = patches_total / sum(patches_total)) %>%
   ungroup() %>%
-  ggplot(., aes(x = severity, y = forest_p, fill = recovery_interval)) +
+  ggplot(., aes(x = severity, y = patches_p, fill = recovery_interval)) +
   geom_bar(stat = "identity") +
-  scale_fill_manual(values = c("#1B7837", "#5AAE61", "#ACD39E", "#D9F0D3")) +
+  scale_fill_manual(values = c("#1B7837", "#5AAE61", "#ACD39E")) +
   scale_x_discrete(expand = c(0, 0)) +
   scale_y_continuous(expand = c(0, 0)) +
   labs(x = "Severity (%)",
-       y = "Prop. forest area",
+       y = "Prop. of patches",
        fill = "Recovery\ninterval") +
   theme_linedraw() +
   theme(panel.border = element_rect(colour = "black", fill = NA, size = 1),
@@ -666,7 +686,7 @@ p <- (p1 + theme(legend.position = "none")) +
   (p2 + labs(y = NULL)) + 
   plot_layout(ncol = 2)
 
-ggsave("figures/figure04.pdf", p, width = 3.5, height = 1.5)
+ggsave("figures/figure04_correction.pdf", p, width = 3.5, height = 1.5)
 
 # Resilience analysis -----------------------------------------------------
 
@@ -744,7 +764,7 @@ p <- ggplot() +
          fill = guide_colorbar(title.position = "top")) +
   scale_size_continuous(range = c(0.01, 3), guide = "none")
 
-ggsave("figures/figure05.pdf", p, width = 7.5, height = 7.5)
+ggsave("figures/figure05_correction.pdf", p, width = 7.5, height = 7.5)
 
 pp1 <- ggplot() +
   geom_sf(data = outline_sf, color = NA, fill = "lightgrey") +
@@ -816,5 +836,5 @@ pp4 <- ggplot() +
 
 p <- pp1 + pp2 + pp3 + pp4 + plot_layout(ncol = 4)
 
-ggsave("figures/SI_resilience.pdf", p, width = 7.5, height = 2.5)
+ggsave("figures/SI_resilience_corrected.pdf", p, width = 7.5, height = 2.5)
 
